@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { errorCodeOf, taggedMessage } from '../src/dataset.js';
 import { buildKey } from '../src/screenshot.js';
-import { cookiesForHost, hasLoginCookie, sessionKey } from '../src/session.js';
+import { cookiesForHost, hasLoginCookie, sessionKey, sessionKeys } from '../src/session.js';
 import {
     accountProxySession,
     classifyPage,
@@ -106,6 +106,10 @@ describe('session helpers', () => {
 
     it('session keys are valid key-value-store keys', () => {
         expect(sessionKey('shopee.com.my')).toMatch(/^[a-zA-Z0-9!\-_.'()]+$/);
+    });
+
+    it('also accepts the local file name as the key (Console upload)', () => {
+        expect(sessionKeys('shopee.vn')).toEqual(['session-shopee.vn', 'session-shopee.vn.json']);
     });
 });
 

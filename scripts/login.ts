@@ -26,7 +26,7 @@ import {
     loadSession,
     saveSession,
     SESSION_STORE,
-    sessionKey,
+    savedSessionKey,
     type ShopeeSession,
 } from '../src/session.js';
 import { classifyPage, isProductApiUrl } from '../src/shopee.js';
@@ -140,10 +140,10 @@ if (checkUrl) {
 
 const session: ShopeeSession = { cookies, loggedInAt };
 await saveSession(host, session);
-console.log(`Saved locally: store "${SESSION_STORE}", key "${sessionKey(host)}".`);
+console.log(`Saved locally: store "${SESSION_STORE}", key "${savedSessionKey(host)}".`);
 if (upload) {
     await saveSession(host, session, { forceCloud: true });
-    console.log(`Uploaded to the Apify named store "${SESSION_STORE}", key "${sessionKey(host)}".`);
+    console.log(`Uploaded to the Apify named store "${SESSION_STORE}", key "${savedSessionKey(host)}".`);
 }
 console.log('The session is a secret: do not commit it or paste it anywhere.');
 await Actor.exit();

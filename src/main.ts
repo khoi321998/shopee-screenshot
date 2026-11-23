@@ -46,6 +46,7 @@ import {
     loadSession,
     saveSession,
     SESSION_STORE,
+    sessionKeys,
     type ShopeeSession,
 } from './session.js';
 import {
@@ -146,7 +147,10 @@ for (const host of new Set(requests.map((r) => r.userData.host))) {
                 `cookies ${describeCookies(session.cookies)}`,
         );
     } else {
-        log.error(`No logged-in session for ${host} in key-value store "${SESSION_STORE}". Run "npm run login".`);
+        log.error(
+            `No logged-in session for ${host} in key-value store "${SESSION_STORE}" ` +
+                `(key "${sessionKeys(host).join('" or "')}"). Run "npm run login".`,
+        );
     }
 }
 
