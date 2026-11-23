@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { errorCodeOf, taggedMessage } from '../src/dataset.js';
-import { buildKey, isPageFilled, MIN_TEXT_LENGTH } from '../src/screenshot.js';
+import { ANY_CONTENT, buildKey, isPageFilled, LISTING_CONTENT } from '../src/screenshot.js';
 import { cookiesForHost, hasLoginCookie, sessionKey, sessionKeys } from '../src/session.js';
 import {
     accountProxySession,
@@ -163,12 +163,26 @@ describe('anti-bot challenge', () => {
 
 describe('isPageFilled', () => {
     it('rejects the empty shell: one window tall or almost no text', () => {
-        expect(isPageFilled({ height: 1080, viewportHeight: 1080, textLength: 2000 }, MIN_TEXT_LENGTH)).toBe(false);
-        expect(isPageFilled({ height: 6000, viewportHeight: 1080, textLength: 40 }, MIN_TEXT_LENGTH)).toBe(false);
+        expect(isPageFilled({ height: 1080, viewportHeight: 1080, textLength: 2000 }, ANY_CONTENT)).toBe(false);
+        expect(isPageFilled({ height: 6000, viewportHeight: 1080, textLength: 40 }, ANY_CONTENT)).toBe(false);
     });
 
-    it('accepts a rendered page', () => {
-        expect(isPageFilled({ height: 6000, viewportHeight: 1080, textLength: 3000 }, MIN_TEXT_LENGTH)).toBe(true);
+    it('rejects half-loaded product and shop pages (measured on the platform 2026-11-23)', () => {
+        expect(isPageFilled({ height: 1517, viewportHeight: 990, textLength: 2912 }, LISTING_CONTENT)).toBe(false);
+        expect(isPageFilled({ height: 1264, viewportHeight: 990, textLength: 1574 }, LISTING_CONTENT)).toBe(false);
+        expect(isPageFilled({ height: 1226, viewportHeight: 990, textLength: 1773 }, LISTING_CONTENT)).toBe(false);
+    });
+
+    it('accepts rendered product and shop pages (measured 2026-11-23)', () => {
+        expect(isPageFilled({ height: 4320, viewportHeight: 990, textLength: 5246 }, LISTING_CONTENT)).toBe(true);
+        expect(isPageFilled({ height: 3273, viewportHeight: 788, textLength: 3896 }, LISTING_CONTENT)).toBe(true);
+        expect(isPageFilled({ height: 4114, viewportHeight: 788, textLength: 5688 }, LISTING_CONTENT)).toBe(true);
+        // A small shop through the residential proxy.
+        expect(isPageFilled({ height: 2901, viewportHeight: 730, textLength: 3676 }, LISTING_CONTENT)).toBe(true);
+    });
+
+    it('keeps the lenient rule for other pages', () => {
+        expect(isPageFilled({ height: 1517, viewportHeight: 990, textLength: 2912 }, ANY_CONTENT)).toBe(true);
     });
 });
 

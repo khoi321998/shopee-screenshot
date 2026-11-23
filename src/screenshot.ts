@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { Actor } from 'apify';
 import type { Page } from 'playwright';
 
-import { currentActorRunId, type OutputItem } from './dataset.js';
+import { currentActorRunId, type OutputItem, taggedMessage } from './dataset.js';
 import type { Logger } from './logger.js';
 
 export interface CaptureOptions {
@@ -15,6 +15,9 @@ export interface CaptureOptions {
     /** Full-page captures stop at this many CSS pixels from the top. */
     maxHeight: number;
 }
+
+/** Time the page may take to show its content again right before the capture (after the scroll). */
+const RECHECK_TIMEOUT_MS = 30_000;
 
 /**
  * Build a key-value-store-safe key for a screenshot. KV keys allow only `[a-zA-Z0-9!\-_.'()]`
@@ -82,23 +85,47 @@ export interface PageFill {
     textLength: number;
 }
 
-/**
- * Whether the page has rendered its content, not just Shopee's empty shell (top bar, chat button).
- * Through a slow residential proxy the product API answers long before the page draws the product:
- * a capture then came out blank, one window tall (seen on the platform 2026-11-23).
- */
-export function isPageFilled(fill: PageFill, minTextLength: number): boolean {
-    return fill.height > fill.viewportHeight + 200 && fill.textLength >= minTextLength;
+/** How much a page must show before it counts as rendered. */
+export interface ContentRule {
+    /** CSS px of page height at least (absolute), on top of being taller than the window. */
+    minHeight: number;
+    /** Characters of visible text at least. */
+    minTextLength: number;
 }
 
-/** Text a rendered product, shop or search page has at least; the shell alone has far less. */
-export const MIN_TEXT_LENGTH = 500;
+/**
+ * Product and shop pages: rendered ones measured 2,900-19,800 px and 3,500-7,800 characters
+ * (2026-11-23, locally and through the residential proxy), while half-loaded ones through a slow
+ * residential proxy measured 1,220-1,520 px and came out as a capture of a few sections or of
+ * Shopee's loading spinner. 2,000 px sits between the two, with room for a small shop.
+ */
+export const LISTING_CONTENT: ContentRule = { minHeight: 2_000, minTextLength: 2_500 };
+
+/** Any other page (search, ...): just more than the empty shell (top bar, chat button). */
+export const ANY_CONTENT: ContentRule = { minHeight: 0, minTextLength: 500 };
+
+/**
+ * Whether the page has rendered its content, not just Shopee's empty shell or part of it.
+ * Through a slow residential proxy the page API answers long before the page draws the listing:
+ * a capture then came out blank, one window tall (seen on the platform 2026-11-23).
+ */
+export function isPageFilled(fill: PageFill, rule: ContentRule): boolean {
+    return (
+        fill.height > fill.viewportHeight + 200 &&
+        fill.height >= rule.minHeight &&
+        fill.textLength >= rule.minTextLength
+    );
+}
 
 /**
  * Wait until the page has rendered its content (see `isPageFilled`), bounded by `timeoutMs`.
  * Returns the last measurement and whether it was filled.
  */
-export async function waitForContent(page: Page, timeoutMs: number): Promise<{ filled: boolean; fill: PageFill }> {
+export async function waitForContent(
+    page: Page,
+    timeoutMs: number,
+    rule: ContentRule,
+): Promise<{ filled: boolean; fill: PageFill }> {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
         const fill = await page
@@ -108,7 +135,7 @@ export async function waitForContent(page: Page, timeoutMs: number): Promise<{ f
                 textLength: (document.body?.innerText ?? '').replace(/\s+/g, ' ').length,
             }))
             .catch(() => ({ height: 0, viewportHeight: 0, textLength: 0 }));
-        const filled = isPageFilled(fill, MIN_TEXT_LENGTH);
+        const filled = isPageFilled(fill, rule);
         if (filled || Date.now() >= deadline) return { filled, fill };
         await page.waitForTimeout(500);
     }
@@ -155,9 +182,29 @@ async function lazyLoadScroll(page: Page, maxHeight: number, log: Logger): Promi
  * `{ url, screenshotUrl, actorRunId }` to the dataset. `screenshotUrl` is a signed public KV URL
  * with `disableRedirect=true` so it resolves directly to the PNG/JPEG.
  */
-export async function captureAndSave(page: Page, url: string, opts: CaptureOptions, log: Logger): Promise<void> {
+export async function captureAndSave(
+    page: Page,
+    url: string,
+    opts: CaptureOptions,
+    rule: ContentRule | null,
+    log: Logger,
+): Promise<void> {
     if (opts.fullPage) {
         await lazyLoadScroll(page, opts.maxHeight, log);
+    }
+    if (rule) {
+        // Checked again right before the capture: the page was seen back on Shopee's loading spinner
+        // after the scroll, and that is what got captured (2026-11-23).
+        const { filled, fill } = await waitForContent(page, RECHECK_TIMEOUT_MS, rule);
+        if (!filled) {
+            throw new Error(
+                taggedMessage(
+                    'BLOCKED',
+                    `The page lost its content before the capture (height ${fill.height}px, ` +
+                        `${fill.textLength} chars of text).`,
+                ),
+            );
+        }
     }
     if (opts.hideAccount) {
         await hideAccount(page);

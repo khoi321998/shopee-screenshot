@@ -38,7 +38,14 @@ import type { BrowserType, Page } from 'playwright';
 
 import { chooseChrome } from './browser.js';
 import { currentActorRunId, type ErrorCode, errorCodeOf, type OutputItem, taggedMessage } from './dataset.js';
-import { ACCOUNT_SELECTORS, captureAndSave, type CaptureOptions, waitForContent } from './screenshot.js';
+import {
+    ACCOUNT_SELECTORS,
+    ANY_CONTENT,
+    captureAndSave,
+    type CaptureOptions,
+    LISTING_CONTENT,
+    waitForContent,
+} from './screenshot.js';
 import {
     cookiesForHost,
     describeCookies,
@@ -265,6 +272,54 @@ function watchPageApi(page: Page, kind: WatchedPage): void {
     pageApiAnswers.set(page, answer);
 }
 
+/** Network counts per page since navigation started, for the logs when a page API never answered. */
+interface NetStats {
+    startedAt: number;
+    finished: number;
+    failed: number;
+    /** Failure reason (e.g. `net::ERR_TUNNEL_CONNECTION_FAILED`) → count. */
+    failures: Map<string, number>;
+    /** Seconds after the start at which the first response arrived, if any. */
+    firstResponseSec: number | null;
+}
+
+const netStats = new WeakMap<Page, NetStats>();
+
+function watchNetwork(page: Page): void {
+    const stats: NetStats = {
+        startedAt: Date.now(),
+        finished: 0,
+        failed: 0,
+        failures: new Map(),
+        firstResponseSec: null,
+    };
+    netStats.set(page, stats);
+    page.on('response', () => {
+        stats.firstResponseSec ??= (Date.now() - stats.startedAt) / 1000;
+    });
+    page.on('requestfinished', () => {
+        stats.finished++;
+    });
+    page.on('requestfailed', (req) => {
+        stats.failed++;
+        const reason = req.failure()?.errorText ?? 'unknown';
+        stats.failures.set(reason, (stats.failures.get(reason) ?? 0) + 1);
+    });
+}
+
+/** The network counts of `page`, flattened for a log line. */
+function describeNetwork(page: Page): Record<string, unknown> {
+    const stats = netStats.get(page);
+    if (!stats) return {};
+    return {
+        elapsedSec: Math.round((Date.now() - stats.startedAt) / 1000),
+        firstResponseSec: stats.firstResponseSec,
+        requestsFinished: stats.finished,
+        requestsFailed: stats.failed,
+        failures: Object.fromEntries([...stats.failures].sort((a, b) => b[1] - a[1]).slice(0, 5)),
+    };
+}
+
 /** Characters of the page's text kept in the logs: enough to recognise Shopee's error pages. */
 const EXCERPT_CHARS = 160;
 
@@ -384,6 +439,7 @@ async function buildCrawler(): Promise<PlaywrightCrawler> {
                 await page.context().addCookies(cookiesForHost(session.cookies, host));
                 const kind = watchedPageKind(request.url);
                 if (kind) watchPageApi(page, kind);
+                watchNetwork(page);
             },
         ],
         failedRequestHandler: async ({ request, log: ctxLog }, error) => {
@@ -437,6 +493,10 @@ async function buildCrawler(): Promise<PlaywrightCrawler> {
             }
             if (kind && apiCode === null) {
                 // Seen through a slow proxy, and always headless: the shell renders, the data never arrives.
+                ctxLog.warning(`The ${kind} API never answered.`, {
+                    ...describeNetwork(page),
+                    finalUrl: page.url(),
+                });
                 throw new Error(taggedMessage('BLOCKED', `The ${kind} API never answered.`));
             }
             if (apiCode !== null && apiCode !== 0) {
@@ -451,7 +511,9 @@ async function buildCrawler(): Promise<PlaywrightCrawler> {
 
             // The API answering is not the page being drawn: never store a capture of the empty shell.
             const started = Date.now();
-            const { filled, fill } = await waitForContent(page, CONTENT_TIMEOUT_MS);
+            // A product or shop page has a lot more to show than a search page; half of it is not the page.
+            const rule = kind ? LISTING_CONTENT : ANY_CONTENT;
+            const { filled, fill } = await waitForContent(page, CONTENT_TIMEOUT_MS, rule);
             // The page's opening text: Shopee's error pages are recognisable from it in the run log.
             const summary = await pageSummary(page);
             if (filled) {
@@ -470,7 +532,9 @@ async function buildCrawler(): Promise<PlaywrightCrawler> {
                 );
             }
 
-            await captureAndSave(page, inputUrl, captureOptions, ctxLog);
+            // Shopee's own short error page (API error) is captured as it is, without the content check.
+            const ok = apiCode === null || apiCode === 0;
+            await captureAndSave(page, inputUrl, captureOptions, ok && filled ? rule : null, ctxLog);
             await refreshSession(page, host, ctxLog);
         },
     });
