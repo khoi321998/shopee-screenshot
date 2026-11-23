@@ -38,7 +38,7 @@ import type { BrowserType, Page } from 'playwright';
 
 import { chooseChrome } from './browser.js';
 import { currentActorRunId, type ErrorCode, errorCodeOf, type OutputItem, taggedMessage } from './dataset.js';
-import { captureAndSave, type CaptureOptions } from './screenshot.js';
+import { captureAndSave, type CaptureOptions, waitForContent } from './screenshot.js';
 import {
     cookiesForHost,
     describeCookies,
@@ -88,6 +88,8 @@ const WAIT_MS = 2_000;
 const RETRY_DELAY_MILLIS = 5_000;
 /** Through a residential proxy the product API took 20-35 s to answer in testing. */
 const PRODUCT_API_TIMEOUT_MS = 60_000;
+/** How long the page may take to draw its content after the API answered (slow residential proxy). */
+const CONTENT_TIMEOUT_MS = 45_000;
 
 await Actor.init();
 log.info(`Actor run ID: ${currentActorRunId() ?? '(none — running locally)'}`);
@@ -357,6 +359,25 @@ async function buildCrawler(): Promise<PlaywrightCrawler> {
             // timeout here was spent idle before the scroll. The scroll waits for its own images.
             await page.waitForLoadState('networkidle', { timeout: 3_000 }).catch(() => undefined);
             await dismissPopups(page);
+
+            // The API answering is not the page being drawn: never store a capture of the empty shell.
+            const started = Date.now();
+            const { filled, fill } = await waitForContent(page, CONTENT_TIMEOUT_MS);
+            if (filled) {
+                ctxLog.info(`Content rendered in ${Date.now() - started} ms.`, fill);
+            } else if (apiCode !== null && apiCode !== 0) {
+                // Shopee's own error page (e.g. a removed product) is short: capture it as it is.
+                ctxLog.info('Error page with little content; capturing it as it is.', fill);
+            } else {
+                throw new Error(
+                    taggedMessage(
+                        'BLOCKED',
+                        `The page did not render its content within ${CONTENT_TIMEOUT_MS / 1000}s ` +
+                            `(height ${fill.height}px, ${fill.textLength} chars of text).`,
+                    ),
+                );
+            }
+
             await captureAndSave(page, inputUrl, captureOptions, ctxLog);
             await refreshSession(page, host, ctxLog);
         },

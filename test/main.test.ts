@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { errorCodeOf, taggedMessage } from '../src/dataset.js';
-import { buildKey } from '../src/screenshot.js';
+import { buildKey, isPageFilled, MIN_TEXT_LENGTH } from '../src/screenshot.js';
 import { cookiesForHost, hasLoginCookie, sessionKey, sessionKeys } from '../src/session.js';
 import {
     accountProxySession,
@@ -153,5 +153,16 @@ describe('anti-bot challenge', () => {
     it('one valid Apify proxy session id per storefront', () => {
         expect(accountProxySession('shopee.com.my')).toBe('shopee_shopee_com_my');
         expect(accountProxySession('shopee.com.my')).toMatch(/^[\w.~]{1,50}$/);
+    });
+});
+
+describe('isPageFilled', () => {
+    it('rejects the empty shell: one window tall or almost no text', () => {
+        expect(isPageFilled({ height: 1080, viewportHeight: 1080, textLength: 2000 }, MIN_TEXT_LENGTH)).toBe(false);
+        expect(isPageFilled({ height: 6000, viewportHeight: 1080, textLength: 40 }, MIN_TEXT_LENGTH)).toBe(false);
+    });
+
+    it('accepts a rendered page', () => {
+        expect(isPageFilled({ height: 6000, viewportHeight: 1080, textLength: 3000 }, MIN_TEXT_LENGTH)).toBe(true);
     });
 });

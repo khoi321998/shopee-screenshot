@@ -100,6 +100,10 @@ The Actor must be able to open the account's named store `shopee-session`. An Ac
 open storages it created itself, so either run it with full permissions or let the first run create the store and
 upload into that one.
 
+Uploading by hand in the Apify Console: upload the local file `session-shopee.vn.json` as it is. The Actor looks
+for the key `session-shopee.vn` and then `session-shopee.vn.json`, and writes the renewed cookies back to the one it
+found.
+
 ## Input
 
 | Field                              | Default     |                                                                            |

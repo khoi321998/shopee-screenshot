@@ -75,6 +75,45 @@ async function waitForImages(page: Page, maxHeight: number, timeoutMs: number): 
     }
 }
 
+/** What the page shows right now: how tall it is and how much text it has. */
+export interface PageFill {
+    height: number;
+    viewportHeight: number;
+    textLength: number;
+}
+
+/**
+ * Whether the page has rendered its content, not just Shopee's empty shell (top bar, chat button).
+ * Through a slow residential proxy the product API answers long before the page draws the product:
+ * a capture then came out blank, one window tall (seen on the platform 2026-11-23).
+ */
+export function isPageFilled(fill: PageFill, minTextLength: number): boolean {
+    return fill.height > fill.viewportHeight + 200 && fill.textLength >= minTextLength;
+}
+
+/** Text a rendered product, shop or search page has at least; the shell alone has far less. */
+export const MIN_TEXT_LENGTH = 500;
+
+/**
+ * Wait until the page has rendered its content (see `isPageFilled`), bounded by `timeoutMs`.
+ * Returns the last measurement and whether it was filled.
+ */
+export async function waitForContent(page: Page, timeoutMs: number): Promise<{ filled: boolean; fill: PageFill }> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+        const fill = await page
+            .evaluate(() => ({
+                height: Math.max(document.body?.scrollHeight ?? 0, document.documentElement.scrollHeight),
+                viewportHeight: window.innerHeight,
+                textLength: (document.body?.innerText ?? '').replace(/\s+/g, ' ').length,
+            }))
+            .catch(() => ({ height: 0, viewportHeight: 0, textLength: 0 }));
+        const filled = isPageFilled(fill, MIN_TEXT_LENGTH);
+        if (filled || Date.now() >= deadline) return { filled, fill };
+        await page.waitForTimeout(500);
+    }
+}
+
 /**
  * Scroll down to `maxHeight` (or the bottom, if sooner) to trigger lazy-loaded content, let it
  * load, then return to the top. Only as far as the capture reaches: the rest of the page is not in
