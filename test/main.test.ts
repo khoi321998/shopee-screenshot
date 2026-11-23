@@ -8,10 +8,13 @@ import {
     classifyPage,
     isProductApiUrl,
     isProductUrl,
+    isShopApiUrl,
+    isShopUrl,
     LOGIN_REQUIRED_CODE,
     normalizeShopeeUrl,
     proxyCountryForHost,
     shopeeHost,
+    watchedPageKind,
 } from '../src/shopee.js';
 
 const PRODUCT = 'https://shopee.vn/%E1%BB%90p-L%C6%B0ng-Iphone-Silicon-Awifi-X5-1-i.7669738.57555754369';
@@ -164,5 +167,27 @@ describe('isPageFilled', () => {
 
     it('accepts a rendered page', () => {
         expect(isPageFilled({ height: 6000, viewportHeight: 1080, textLength: 3000 }, MIN_TEXT_LENGTH)).toBe(true);
+    });
+});
+
+describe('shop pages and their API', () => {
+    it('knows shop URLs by id or username, not categories, search or products', () => {
+        expect(isShopUrl('https://shopee.vn/shop/820223003')).toBe(true);
+        expect(isShopUrl('https://shopee.vn/chanhstore195')).toBe(true);
+        expect(isShopUrl('https://shopee.vn/Women-Clothes-cat.11044951')).toBe(false);
+        expect(isShopUrl('https://shopee.vn/search?keyword=x')).toBe(false);
+        expect(isShopUrl(PRODUCT)).toBe(false);
+    });
+
+    it('matches the shop header API only', () => {
+        expect(isShopApiUrl('https://shopee.vn/api/v4/shop/get_shop_base_v2?username=chanhstore195')).toBe(true);
+        expect(isShopApiUrl('https://shopee.vn/api/v4/shop/get_shop_base?shopid=1')).toBe(true);
+        expect(isShopApiUrl('https://shopee.vn/api/v4/shop/get_shop_tab?shopid=1')).toBe(false);
+    });
+
+    it('watches the product API on products, the shop API on shops, nothing elsewhere', () => {
+        expect(watchedPageKind(PRODUCT)).toBe('product');
+        expect(watchedPageKind('https://shopee.vn/chanhstore195')).toBe('shop');
+        expect(watchedPageKind('https://shopee.vn/search?keyword=x')).toBeNull();
     });
 });

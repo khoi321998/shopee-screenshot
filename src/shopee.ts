@@ -69,8 +69,58 @@ export function isProductApiUrl(url: string): boolean {
     return /\/api\/v4\/pdp\/get_(pc|rw)\b/.test(url);
 }
 
+/** Single-segment paths that are Shopee pages, not shop usernames. */
+const RESERVED_PATHS = new Set([
+    'search',
+    'mall',
+    'cart',
+    'user',
+    'buyer',
+    'verify',
+    'daily_discover',
+    'flash_sale',
+    'm',
+    'events3',
+    'universal-link',
+]);
+
+/** Shop pages: `/shop/<shopId>` or `/<username>` (not a category `/<name>-cat.<id>` or a reserved page). */
+export function isShopUrl(url: string): boolean {
+    let pathname: string;
+    try {
+        ({ pathname } = new URL(url));
+    } catch {
+        return false;
+    }
+    if (isProductUrl(url)) return false;
+    const segments = pathname.split('/').filter(Boolean);
+    if (segments.length === 2) return segments[0].toLowerCase() === 'shop' && /^\d+$/.test(segments[1]);
+    return segments.length === 1 && !RESERVED_PATHS.has(segments[0].toLowerCase()) && !/-cat\./i.test(segments[0]);
+}
+
+/** The shop API the page calls for the shop's header (name, rating, ...). */
+export function isShopApiUrl(url: string): boolean {
+    return /\/api\/v4\/shop\/get_shop_base(_v2)?(\?|$)/.test(url);
+}
+
+/**
+ * The page kinds whose data API decides the verdict (product → `pdp/get_pc`, shop →
+ * `shop/get_shop_base_v2`, measured 2026-11-23), or null for pages judged by their URL only (search).
+ */
+export type WatchedPage = 'product' | 'shop';
+
+export function watchedPageKind(url: string): WatchedPage | null {
+    if (isProductUrl(url)) return 'product';
+    if (isShopUrl(url)) return 'shop';
+    return null;
+}
+
+export function isPageApiUrl(kind: WatchedPage, url: string): boolean {
+    return kind === 'product' ? isProductApiUrl(url) : isShopApiUrl(url);
+}
+
 export type PageVerdict =
-    /** The page Shopee meant to show (product, shop, search, or its own "product not found"). */
+    /** The page Shopee meant to show (product, shop, search, or its own "not found" page). */
     | { kind: 'ok' }
     /** Not logged in: the session is missing, expired or was logged out. Retrying cannot help. */
     | { kind: 'login_required' }
@@ -84,8 +134,8 @@ export type PageVerdict =
     | { kind: 'blocked'; reason: string };
 
 /**
- * Judge where the browser ended up. `apiCode` is the product API's `error` field, or null when it
- * was not seen (non-product page, or the API never answered).
+ * Judge where the browser ended up. `apiCode` is the page API's `error` field (product or shop, see
+ * `watchedPageKind`), or null when it was not seen (other page, or the API never answered).
  */
 export function classifyPage(finalUrl: string, apiCode: number | null, hasSessionCookie: boolean): PageVerdict {
     let parsed: URL | null = null;
@@ -112,7 +162,7 @@ export function classifyPage(finalUrl: string, apiCode: number | null, hasSessio
     }
     if (apiCode === LOGIN_REQUIRED_CODE) {
         return hasSessionCookie
-            ? { kind: 'blocked', reason: `product API error ${LOGIN_REQUIRED_CODE} while logged in` }
+            ? { kind: 'blocked', reason: `page API error ${LOGIN_REQUIRED_CODE} while logged in` }
             : { kind: 'login_required' };
     }
     return { kind: 'ok' };

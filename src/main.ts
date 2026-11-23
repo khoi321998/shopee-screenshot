@@ -38,7 +38,7 @@ import type { BrowserType, Page } from 'playwright';
 
 import { chooseChrome } from './browser.js';
 import { currentActorRunId, type ErrorCode, errorCodeOf, type OutputItem, taggedMessage } from './dataset.js';
-import { captureAndSave, type CaptureOptions, waitForContent } from './screenshot.js';
+import { ACCOUNT_SELECTORS, captureAndSave, type CaptureOptions, waitForContent } from './screenshot.js';
 import {
     cookiesForHost,
     describeCookies,
@@ -52,11 +52,12 @@ import {
 import {
     accountProxySession,
     classifyPage,
-    isProductApiUrl,
-    isProductUrl,
+    isPageApiUrl,
     normalizeShopeeUrl,
     proxyCountryForHost,
     shopeeHost,
+    type WatchedPage,
+    watchedPageKind,
 } from './shopee.js';
 
 interface Input {
@@ -86,8 +87,14 @@ const MAX_CONCURRENCY = 1;
 const MAX_REQUEST_RETRIES = 1;
 const WAIT_MS = 2_000;
 const RETRY_DELAY_MILLIS = 5_000;
-/** Through a residential proxy the product API took 20-35 s to answer in testing. */
-const PRODUCT_API_TIMEOUT_MS = 60_000;
+/** Navigation (to `domcontentloaded`) may take this long through a slow residential proxy. */
+const NAVIGATION_TIMEOUT_SECS = 90;
+/**
+ * The page API is watched from before the navigation starts, so this must outlast the navigation
+ * itself: on the platform the page alone took ~60 s to load through the residential proxy, the old
+ * 60 s watch ran out as it arrived and the attempt was wasted (2026-11-23). 20-35 s was typical.
+ */
+const PAGE_API_TIMEOUT_MS = (NAVIGATION_TIMEOUT_SECS + 30) * 1000;
 /** How long the page may take to draw its content after the API answered (slow residential proxy). */
 const CONTENT_TIMEOUT_MS = 45_000;
 
@@ -215,18 +222,52 @@ async function buildProxy(): Promise<ProxyConfiguration | undefined> {
 
 // --- Page helpers --------------------------------------------------------------------------------
 
-/** The product API's `error` field per page, recorded from the first navigation response on. */
-const productApiCodes = new WeakMap<Page, Promise<number | null>>();
+/** What the page API (product or shop) answered: its `error` field, HTTP status and message, for the logs. */
+interface ApiAnswer {
+    code: number;
+    status: number;
+    message: string | null;
+}
 
-function watchProductApi(page: Page): void {
-    const code = page
-        .waitForResponse((response) => isProductApiUrl(response.url()), { timeout: PRODUCT_API_TIMEOUT_MS })
-        .then(async (response) => {
-            const body = (await response.json()) as { error?: unknown };
-            return typeof body.error === 'number' ? body.error : 0;
+/** The page API's answer per page, recorded from the first navigation response on. */
+const pageApiAnswers = new WeakMap<Page, Promise<ApiAnswer | null>>();
+
+function watchPageApi(page: Page, kind: WatchedPage): void {
+    const answer = page
+        .waitForResponse((response) => isPageApiUrl(kind, response.url()), { timeout: PAGE_API_TIMEOUT_MS })
+        .then(async (response): Promise<ApiAnswer> => {
+            const body = (await response.json().catch(() => ({}))) as { error?: unknown; error_msg?: unknown };
+            return {
+                code: typeof body.error === 'number' ? body.error : 0,
+                status: response.status(),
+                message: typeof body.error_msg === 'string' && body.error_msg ? body.error_msg : null,
+            };
         })
         .catch(() => null);
-    productApiCodes.set(page, code);
+    pageApiAnswers.set(page, answer);
+}
+
+/** Characters of the page's text kept in the logs: enough to recognise Shopee's error pages. */
+const EXCERPT_CHARS = 160;
+
+/**
+ * The page's title and the start of its text, for the logs: tells a real page from Shopee's error
+ * page ("Trang không khả dụng") at a glance. The scraper account's name in the top bar is left out.
+ */
+async function pageSummary(page: Page): Promise<{ title: string; excerpt: string }> {
+    return page
+        .evaluate(
+            ({ selectors, max }) => {
+                let text = document.body?.innerText ?? '';
+                for (const el of document.querySelectorAll<HTMLElement>(selectors.join(', '))) {
+                    const own = el.innerText.trim();
+                    if (own) text = text.split(own).join('');
+                }
+                return { title: document.title, excerpt: text.replace(/\s+/g, ' ').trim().slice(0, max) };
+            },
+            { selectors: ACCOUNT_SELECTORS, max: EXCERPT_CHARS },
+        )
+        .catch(() => ({ title: '', excerpt: '' }));
 }
 
 /** Best-effort: close a promotion popup that would cover the page. */
@@ -256,7 +297,7 @@ async function refreshSession(page: Page, host: string, ctxLog: PlaywrightCrawli
 async function buildCrawler(): Promise<PlaywrightCrawler> {
     return new PlaywrightCrawler({
         proxyConfiguration: await buildProxy(),
-        navigationTimeoutSecs: 90,
+        navigationTimeoutSecs: NAVIGATION_TIMEOUT_SECS,
         requestHandlerTimeoutSecs: 300,
         minConcurrency: 1,
         maxConcurrency: MAX_CONCURRENCY,
@@ -305,7 +346,8 @@ async function buildCrawler(): Promise<PlaywrightCrawler> {
                 const session = sessions.get(host);
                 if (!session) throw new NonRetryableError(sessionExpired(host));
                 await page.context().addCookies(cookiesForHost(session.cookies, host));
-                watchProductApi(page);
+                const kind = watchedPageKind(request.url);
+                if (kind) watchPageApi(page, kind);
             },
         ],
         failedRequestHandler: async ({ request, log: ctxLog }, error) => {
@@ -317,22 +359,33 @@ async function buildCrawler(): Promise<PlaywrightCrawler> {
         },
         requestHandler: async ({ page, request, log: ctxLog }) => {
             const { host, inputUrl } = request.userData as RequestData;
-            const product = isProductUrl(request.url);
+            const kind = watchedPageKind(request.url);
 
-            // On a product page the API's answer is the verdict; elsewhere only the URL can tell.
-            const apiCode = product ? await (productApiCodes.get(page) ?? Promise.resolve(null)) : null;
-            // The redirect to the verification page follows a refusal by a moment. A product API that
-            // answered 0 is no refusal, so there is nothing to wait for: on a good page this wait
-            // always ran to its timeout.
-            if (!(product && apiCode === 0)) {
+            // On a product or shop page its data API's answer is the verdict; elsewhere only the URL can
+            // tell. Without it a shop page Shopee refused ("Trang không khả dụng", seen through a residential
+            // IP 2026-11-23) was stored as a good capture.
+            const api = kind ? await (pageApiAnswers.get(page) ?? Promise.resolve(null)) : null;
+            const apiCode = api?.code ?? null;
+            // The redirect to the verification page follows a refusal by a moment. An API that answered 0
+            // is no refusal, so there is nothing to wait for: on a good page this wait always ran to its
+            // timeout.
+            if (!(kind && apiCode === 0)) {
                 await page
-                    .waitForURL(/\/(verify|buyer\/login)\//, { timeout: product ? 5_000 : 10_000 })
+                    .waitForURL(/\/(verify|buyer\/login)\//, { timeout: kind ? 5_000 : 10_000 })
                     .catch(() => undefined);
             }
 
             const loginCookies = cookiesForHost(await page.context().cookies(), host);
             const verdict = classifyPage(page.url(), apiCode, hasLoginCookie(loginCookies));
-            ctxLog.info(`Page check: ${verdict.kind}`, { url: request.url, apiCode, finalUrl: page.url() });
+            ctxLog.info(`Page check: ${verdict.kind}`, {
+                url: request.url,
+                page: kind ?? 'other',
+                apiCode,
+                apiStatus: api?.status ?? null,
+                apiMessage: api?.message ?? null,
+                finalUrl: page.url(),
+                title: await page.title().catch(() => ''),
+            });
 
             if (verdict.kind === 'login_required') {
                 // Every later URL of this storefront would get the same answer: fail them fast.
@@ -346,13 +399,13 @@ async function buildCrawler(): Promise<PlaywrightCrawler> {
             if (verdict.kind === 'blocked') {
                 throw new NonRetryableError(taggedMessage('BLOCKED', verdict.reason));
             }
-            if (product && apiCode === null) {
-                // Seen through a slow proxy, and always headless: the shell renders, the product data never arrives.
-                throw new Error(taggedMessage('BLOCKED', 'The product API never answered.'));
+            if (kind && apiCode === null) {
+                // Seen through a slow proxy, and always headless: the shell renders, the data never arrives.
+                throw new Error(taggedMessage('BLOCKED', `The ${kind} API never answered.`));
             }
             if (apiCode !== null && apiCode !== 0) {
-                // e.g. a removed product: Shopee's own error page is still the page to document.
-                ctxLog.info(`Product API answered error ${apiCode}; capturing the page Shopee shows.`);
+                // e.g. a removed product or shop: Shopee's own error page is still the page to document.
+                ctxLog.info(`The ${kind} API answered error ${apiCode}; capturing the page Shopee shows.`);
             }
 
             // Short on purpose: Shopee keeps connections open, so networkidle rarely comes and a long
@@ -363,12 +416,15 @@ async function buildCrawler(): Promise<PlaywrightCrawler> {
             // The API answering is not the page being drawn: never store a capture of the empty shell.
             const started = Date.now();
             const { filled, fill } = await waitForContent(page, CONTENT_TIMEOUT_MS);
+            // The page's opening text: Shopee's error pages are recognisable from it in the run log.
+            const summary = await pageSummary(page);
             if (filled) {
-                ctxLog.info(`Content rendered in ${Date.now() - started} ms.`, fill);
+                ctxLog.info(`Content rendered in ${Date.now() - started} ms.`, { ...fill, ...summary });
             } else if (apiCode !== null && apiCode !== 0) {
                 // Shopee's own error page (e.g. a removed product) is short: capture it as it is.
-                ctxLog.info('Error page with little content; capturing it as it is.', fill);
+                ctxLog.info('Error page with little content; capturing it as it is.', { ...fill, ...summary });
             } else {
+                ctxLog.warning('The page stayed (almost) empty.', { ...fill, ...summary });
                 throw new Error(
                     taggedMessage(
                         'BLOCKED',
