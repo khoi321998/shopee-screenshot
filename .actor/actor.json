@@ -1,0 +1,19 @@
+{
+    "$schema": "https://apify.com/schemas/v1/actor.ide.json",
+    "actorSpecification": 1,
+    "name": "shopee-screenshot",
+    "title": "Shopee Screenshot",
+    "description": "Screenshots of Shopee product, shop and search pages, logged in with a saved session.",
+    "version": "0.0",
+    "meta": {
+        "templateId": "ts-crawlee-playwright-chrome",
+        "generatedBy": "Claude Code with Claude Opus 5.5"
+    },
+    "minMemoryMbytes": 4096,
+    "inputSchema": "./input_schema.json",
+    "outputSchema": "./output_schema.json",
+    "storages": {
+        "dataset": "./dataset_schema.json"
+    },
+    "dockerfile": "../Dockerfile"
+}

@@ -1,0 +1,22 @@
+{
+    "$schema": "https://apify.com/schemas/v1/dataset.ide.json",
+    "actorSpecification": 1,
+    "fields": {},
+    "views": {
+        "overview": {
+            "title": "Overview",
+            "transformation": {
+                "fields": ["url", "screenshotUrl", "errorCode", "error"]
+            },
+            "display": {
+                "component": "table",
+                "properties": {
+                    "url": { "label": "Page URL", "format": "link" },
+                    "screenshotUrl": { "label": "Screenshot", "format": "image" },
+                    "errorCode": { "label": "Error code", "format": "text" },
+                    "error": { "label": "Error", "format": "text" }
+                }
+            }
+        }
+    }
+}

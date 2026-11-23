@@ -1,0 +1,83 @@
+{
+    "$schema": "https://apify.com/schemas/v1/input.ide.json",
+    "title": "Shopee Screenshot Actor",
+    "type": "object",
+    "schemaVersion": 1,
+    "properties": {
+        "startUrls": {
+            "title": "Start URLs",
+            "type": "array",
+            "description": "Shopee page URLs to screenshot (product, shop, search). Each storefront (shopee.vn, shopee.co.th, …) needs its own saved login session in the named key-value store `shopee-session` (see README).",
+            "editor": "requestListSources",
+            "prefill": [
+                {
+                    "url": "https://shopee.vn/product/7669738/57555754369"
+                }
+            ]
+        },
+        "fullPage": {
+            "title": "Full Page Screenshot",
+            "type": "boolean",
+            "default": true,
+            "description": "Capture the page from the top down to Max Capture Height (lazy-loads it first) instead of just the viewport."
+        },
+        "maxScrollHeight": {
+            "title": "Max Capture Height",
+            "type": "integer",
+            "default": 5000,
+            "minimum": 1000,
+            "maximum": 30000,
+            "unit": "px",
+            "description": "Full-page captures scroll down this far (loading what Shopee shows on the way) and stop here. 5000 px covers a product with its details, description and the start of its reviews."
+        },
+        "viewportWidth": {
+            "title": "Window Width",
+            "type": "integer",
+            "default": 1920,
+            "minimum": 320,
+            "maximum": 3840,
+            "description": "Browser window width in pixels, applied with --window-size rather than a viewport override."
+        },
+        "viewportHeight": {
+            "title": "Window Height",
+            "type": "integer",
+            "default": 1080,
+            "minimum": 320,
+            "maximum": 2160,
+            "description": "Browser window height in pixels. A headed window spends ~90px on browser chrome; full-page captures are unaffected."
+        },
+        "hideAccount": {
+            "title": "Hide Logged-in Account",
+            "type": "boolean",
+            "default": true,
+            "description": "Hide the avatar and username of the scraper's Shopee account in the page's top bar."
+        },
+        "proxy": {
+            "title": "Use Apify Residential Proxy",
+            "type": "boolean",
+            "default": true,
+            "description": "On: Apify residential proxy in the storefront's country (shopee.vn → VN), one fixed session per storefront so the IP changes as little as Apify allows. Off: the machine's own IP. Ignored when Static Proxy URL is set."
+        },
+        "proxyUrl": {
+            "title": "Static Proxy URL",
+            "type": "string",
+            "editor": "textfield",
+            "isSecret": true,
+            "description": "Optional http://user:pass@host:port of a static proxy in the storefront's country. Used instead of Apify Proxy, so the account always browses from the same IP: Shopee grows suspicious of one account seen from many IPs."
+        },
+        "headless": {
+            "title": "Headless Browser",
+            "type": "boolean",
+            "default": false,
+            "description": "Leave this OFF. Shopee refuses headless Chrome even with a valid login (measured 2026-11-20). The Apify base image runs an Xvfb display, so headed works on the platform."
+        },
+        "maxRequestsPerCrawl": {
+            "title": "Max Requests per Crawl",
+            "type": "integer",
+            "default": 10,
+            "minimum": 1,
+            "description": "Safety cap on the total number of requests (including retries) made by this run."
+        }
+    },
+    "required": ["startUrls"]
+}
