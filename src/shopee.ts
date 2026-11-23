@@ -47,6 +47,23 @@ export function accountProxySession(host: string): string {
     return `shopee_${host.replace(/\W/g, '_')}`;
 }
 
+/**
+ * A fresh proxy session id for `host`, for when the residential IP behind the current one is
+ * unreachable: Apify then hands out another IP in the same country. `now` keeps it unique.
+ */
+export function nextAccountProxySession(host: string, now = Date.now()): string {
+    return `${accountProxySession(host)}_${now.toString(36)}`;
+}
+
+/**
+ * The proxy could not reach Shopee at all (the residential IP went offline). Shopee never saw the
+ * request, so moving to another IP costs nothing; retrying on the same session id only hit the same
+ * dead IP again, ten times in a row (seen on the platform 2026-11-23).
+ */
+export function isProxyConnectionError(message: string): boolean {
+    return /ERR_(TUNNEL_CONNECTION_FAILED|PROXY_CONNECTION_FAILED|PROXY_AUTH|SOCKS_CONNECTION_FAILED)/.test(message);
+}
+
 /** Desktop and mobile hosts serve the same page; the session cookies are set on the bare host. */
 export function normalizeShopeeUrl(url: string): string {
     const parsed = new URL(url);

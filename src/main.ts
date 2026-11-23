@@ -53,6 +53,8 @@ import {
     accountProxySession,
     classifyPage,
     isPageApiUrl,
+    isProxyConnectionError,
+    nextAccountProxySession,
     normalizeShopeeUrl,
     proxyCountryForHost,
     shopeeHost,
@@ -190,6 +192,17 @@ function captchaRequired(host: string): string {
  * session id per storefront, ignoring Crawlee's session rotation. Apify keeps a residential
  * session's IP only while the IP stays available, so the IP still changes between runs (seen).
  */
+/** True once Apify residential proxy (not `proxyUrl`, not none) is in use; only then are proxy sessions ours. */
+let residentialProxy = false;
+
+/** The proxy session id per storefront in this run, after any switch away from an unreachable IP. */
+const proxySessions = new Map<string, string>();
+
+/** The proxy session for `host`: this run's switch, else the one the last good capture used, else the default. */
+function proxySessionFor(host: string): string {
+    return proxySessions.get(host) ?? sessions.get(host)?.proxySession ?? accountProxySession(host);
+}
+
 async function buildProxy(): Promise<ProxyConfiguration | undefined> {
     if (input.proxyUrl) {
         log.info('Proxy: static proxyUrl from input.');
@@ -210,12 +223,17 @@ async function buildProxy(): Promise<ProxyConfiguration | undefined> {
         }
         byCountry.set(country, config);
     }
-    log.info(`Proxy: RESIDENTIAL ${[...byCountry.keys()].join(', ')}, one fixed session per storefront`);
+    residentialProxy = true;
+    const hosts = [...new Set(requests.map((r) => r.userData.host))];
+    log.info(
+        `Proxy: RESIDENTIAL ${[...byCountry.keys()].join(', ')}, one fixed session per storefront ` +
+            `(${hosts.map((h) => `${h}: ${proxySessionFor(h)}`).join(', ')})`,
+    );
     return new ProxyConfiguration({
         newUrlFunction: async (_sessionId, options) => {
             const host = (options?.request?.userData as RequestData | undefined)?.host ?? 'shopee.vn';
             const config = byCountry.get(proxyCountryForHost(host)) ?? [...byCountry.values()][0];
-            return (await config.newUrl(accountProxySession(host))) ?? null;
+            return (await config.newUrl(proxySessionFor(host))) ?? null;
         },
     });
 }
@@ -285,7 +303,13 @@ async function refreshSession(page: Page, host: string, ctxLog: PlaywrightCrawli
     if (!session) return;
     const cookies = cookiesForHost(await page.context().cookies(), host) as ShopeeSession['cookies'];
     if (!hasLoginCookie(cookies)) return;
-    const refreshed: ShopeeSession = { ...session, cookies, refreshedAt: new Date().toISOString() };
+    const refreshed: ShopeeSession = {
+        ...session,
+        cookies,
+        refreshedAt: new Date().toISOString(),
+        // The IP that just worked: the next run starts on it.
+        ...(residentialProxy ? { proxySession: proxySessionFor(host) } : {}),
+    };
     sessions.set(host, refreshed);
     await saveSession(host, refreshed).catch((error: Error) => {
         ctxLog.warning(`Could not write the refreshed session back: ${error.message}`);
@@ -312,7 +336,19 @@ async function buildCrawler(): Promise<PlaywrightCrawler> {
             // Judged in the request handler, where the login state is known.
             blockedStatusCodes: [],
         },
+        // A dead residential IP fails every attempt the same way; the session switch below fixes it at
+        // the first one, so a few rotations are plenty (Crawlee's default of 10 only repeated the failure).
+        maxSessionRotations: 3,
         errorHandler: async ({ request }, error) => {
+            const { host } = request.userData as RequestData;
+            if (residentialProxy && isProxyConnectionError(error.message)) {
+                const previous = proxySessionFor(host);
+                proxySessions.set(host, nextAccountProxySession(host));
+                log.warning(
+                    `The residential IP of proxy session ${previous} is unreachable; ` +
+                        `switching ${host} to proxy session ${proxySessionFor(host)} (another IP in the same country).`,
+                );
+            }
             log.warning(
                 `Attempt ${request.retryCount + 1}/${MAX_REQUEST_RETRIES + 1} failed for ${request.url}: ` +
                     `${error.message}. Retrying in ${RETRY_DELAY_MILLIS / 1000}s.`,

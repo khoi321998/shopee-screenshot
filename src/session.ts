@@ -29,6 +29,11 @@ export interface ShopeeSession {
     loggedInAt?: string;
     /** ISO time the cookies were last written back after a successful capture. */
     refreshedAt?: string;
+    /**
+     * The Apify residential proxy session id the last successful capture went through, so the next run
+     * starts on the same IP (Shopee watches how many IPs one account comes from). Absent: the default.
+     */
+    proxySession?: string;
 }
 
 /** Shopee's login token cookie; without it the session cannot be logged in. */

@@ -7,10 +7,12 @@ import {
     accountProxySession,
     classifyPage,
     isProductApiUrl,
+    isProxyConnectionError,
     isProductUrl,
     isShopApiUrl,
     isShopUrl,
     LOGIN_REQUIRED_CODE,
+    nextAccountProxySession,
     normalizeShopeeUrl,
     proxyCountryForHost,
     shopeeHost,
@@ -189,5 +191,23 @@ describe('shop pages and their API', () => {
         expect(watchedPageKind(PRODUCT)).toBe('product');
         expect(watchedPageKind('https://shopee.vn/chanhstore195')).toBe('shop');
         expect(watchedPageKind('https://shopee.vn/search?keyword=x')).toBeNull();
+    });
+});
+
+describe('proxy sessions', () => {
+    it('switches to a new, valid Apify session id after a dead IP', () => {
+        const next = nextAccountProxySession('shopee.com.my', 1_800_000_000_000);
+        expect(next).toMatch(/^shopee_shopee_com_my_[a-z0-9]+$/);
+        expect(next.length).toBeLessThanOrEqual(50);
+        expect(next).not.toBe(accountProxySession('shopee.com.my'));
+    });
+
+    it('treats only "could not reach the site" proxy failures as a dead IP', () => {
+        expect(isProxyConnectionError('page.goto: net::ERR_TUNNEL_CONNECTION_FAILED at https://shopee.vn/x')).toBe(
+            true,
+        );
+        expect(isProxyConnectionError('page.goto: net::ERR_PROXY_CONNECTION_FAILED')).toBe(true);
+        expect(isProxyConnectionError('[BLOCKED] The product API never answered.')).toBe(false);
+        expect(isProxyConnectionError('page.goto: Timeout 90000ms exceeded.')).toBe(false);
     });
 });
