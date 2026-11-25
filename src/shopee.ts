@@ -38,6 +38,41 @@ export function shopeeHost(url: string): string | null {
     return host in COUNTRY_BY_HOST ? host : null;
 }
 
+/** The storefront's own time zone (its capital's), for the browser's clock. */
+const TIME_ZONE_BY_HOST: Record<string, string> = {
+    'shopee.vn': 'Asia/Ho_Chi_Minh',
+    'shopee.co.th': 'Asia/Bangkok',
+    'shopee.sg': 'Asia/Singapore',
+    'shopee.com.my': 'Asia/Kuala_Lumpur',
+    'shopee.ph': 'Asia/Manila',
+    'shopee.co.id': 'Asia/Jakarta',
+    'shopee.tw': 'Asia/Taipei',
+    'shopee.com.br': 'America/Sao_Paulo',
+};
+
+/**
+ * The time zone the browser should report for `host`. The platform's containers run on UTC: a
+ * browser on a Vietnamese IP saying UTC is one of the marks Shopee's page script holds against a
+ * session (see `browserArgs`).
+ */
+export function timeZoneForHost(host: string): string {
+    return TIME_ZONE_BY_HOST[host] ?? 'Asia/Ho_Chi_Minh';
+}
+
+/**
+ * Chrome flags. On Linux (the platform: Xvfb, no GPU) Chrome otherwise has no WebGL at all;
+ * SwiftShader renders it in software, and `reportDesktopGpu` hides that it is SwiftShader. Shopee
+ * judges the WebGL renderer: measured 2026-11-25 on a Windows desktop where the shop page passed,
+ * turning WebGL off or switching it to SwiftShader got it refused every time (its shop API
+ * `rcmd_items` answered 90309999 and the page went to /verify/traffic/error), while a US time zone
+ * or a Linux user agent changed nothing. See README "Why it works this way".
+ */
+export function browserArgs(platform: string, width: number, height: number): string[] {
+    const size = `--window-size=${width},${height}`;
+    if (platform === 'linux') return [size, '--use-angle=swiftshader', '--enable-unsafe-swiftshader'];
+    return ['--disable-gpu', size];
+}
+
 export function proxyCountryForHost(host: string): string {
     return COUNTRY_BY_HOST[host] ?? 'VN';
 }

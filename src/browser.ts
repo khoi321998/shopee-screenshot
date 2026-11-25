@@ -1,6 +1,8 @@
 import { existsSync } from 'node:fs';
 import { platform } from 'node:os';
 
+import type { BrowserContext } from 'playwright';
+
 /**
  * Which Chrome the crawler drives — the single biggest lever this Actor has on Cloudflare.
  *
@@ -92,4 +94,40 @@ export function chooseChrome(): ChromeChoice {
     }
 
     return { useChrome: true, executablePath: found, description: `Google Chrome at ${found}` };
+}
+
+/**
+ * What a Linux desktop with an ordinary Intel GPU reports as its WebGL vendor and renderer.
+ * Linux, to agree with the user agent the platform's Chrome sends.
+ */
+export const DESKTOP_GPU = {
+    vendor: 'Google Inc. (Intel)',
+    renderer: 'ANGLE (Intel, Mesa Intel(R) UHD Graphics 620 (KBL GT2), OpenGL 4.6)',
+};
+
+const gpuReported = new WeakSet<BrowserContext>();
+
+/**
+ * On a machine without a GPU (the platform), make WebGL report an ordinary desktop GPU instead of
+ * "SwiftShader", the software renderer Chrome falls back to. Shopee refuses a browser whose WebGL
+ * renderer is SwiftShader or missing (measured 2026-11-25, see `browserArgs` in shopee.ts). Only the
+ * two "unmasked" vendor/renderer strings change; WebGL itself keeps running on SwiftShader. A Proxy
+ * keeps `getParameter` looking native (`toString()` still says `[native code]`). Once per context.
+ */
+export async function reportDesktopGpu(context: BrowserContext): Promise<void> {
+    if (gpuReported.has(context)) return;
+    gpuReported.add(context);
+    await context.addInitScript(({ vendor, renderer }) => {
+        const UNMASKED_VENDOR = 0x9245;
+        const UNMASKED_RENDERER = 0x9246;
+        for (const proto of [WebGLRenderingContext.prototype, WebGL2RenderingContext.prototype]) {
+            proto.getParameter = new Proxy(proto.getParameter, {
+                apply(target, self, args: [number]) {
+                    if (args[0] === UNMASKED_VENDOR) return vendor;
+                    if (args[0] === UNMASKED_RENDERER) return renderer;
+                    return Reflect.apply(target, self, args);
+                },
+            });
+        }
+    }, DESKTOP_GPU);
 }

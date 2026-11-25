@@ -36,7 +36,7 @@ import { Actor, log } from 'apify';
 import { chromium as patchrightChromium } from 'patchright';
 import type { BrowserType, Page } from 'playwright';
 
-import { chooseChrome } from './browser.js';
+import { chooseChrome, reportDesktopGpu } from './browser.js';
 import { currentActorRunId, type ErrorCode, errorCodeOf, type OutputItem, taggedMessage } from './dataset.js';
 import {
     ACCOUNT_SELECTORS,
@@ -59,6 +59,7 @@ import {
 } from './session.js';
 import {
     accountProxySession,
+    browserArgs,
     classifyPage,
     isPageApiUrl,
     isProxyConnectionError,
@@ -66,6 +67,7 @@ import {
     normalizeShopeeUrl,
     proxyCountryForHost,
     shopeeHost,
+    timeZoneForHost,
     type WatchedPage,
     watchedPageKind,
 } from './shopee.js';
@@ -284,6 +286,8 @@ interface NetStats {
     firstResponseSec: number | null;
     /** Every main-frame URL the page went to, with the second it happened: shows a redirect after the render. */
     navigations: string[];
+    /** Shopee API calls that answered an `error` code, with the second it came: what set off a redirect. */
+    apiErrors: string[];
 }
 
 const netStats = new WeakMap<Page, NetStats>();
@@ -296,8 +300,27 @@ function watchNetwork(page: Page): void {
         failures: new Map(),
         firstResponseSec: null,
         navigations: [],
+        apiErrors: [],
     };
     netStats.set(page, stats);
+    page.on('response', (response) => {
+        const url = response.url();
+        if (!/shopee\.[a-z.]+\/api\//.test(url)) return;
+        const at = Math.round((Date.now() - stats.startedAt) / 1000);
+        response
+            .json()
+            .then((body: { error?: unknown }) => {
+                if (typeof body?.error === 'number' && body.error !== 0) {
+                    stats.apiErrors.push(
+                        `${at}s ${new URL(url).pathname} error=${body.error} http=${response.status()}`,
+                    );
+                }
+            })
+            .catch(() => {
+                if (response.status() >= 400)
+                    stats.apiErrors.push(`${at}s ${new URL(url).pathname} http=${response.status()}`);
+            });
+    });
     page.on('framenavigated', (frame) => {
         if (frame !== page.mainFrame()) return;
         stats.navigations.push(`${Math.round((Date.now() - stats.startedAt) / 1000)}s ${frame.url()}`);
@@ -326,6 +349,7 @@ function describeNetwork(page: Page): Record<string, unknown> {
         requestsFailed: stats.failed,
         failures: Object.fromEntries([...stats.failures].sort((a, b) => b[1] - a[1]).slice(0, 5)),
         navigations: stats.navigations.slice(-5),
+        apiErrors: stats.apiErrors.slice(-8),
     };
 }
 
@@ -370,7 +394,7 @@ async function assertStillOnPage(page: Page, host: string, renderedUrl: string):
     };
     if (path(now) === path(renderedUrl)) return;
     const verdict = classifyPage(now, null, hasLoginCookie(cookiesForHost(await page.context().cookies(), host)));
-    log.warning(`The page moved after it rendered: ${renderedUrl} -> ${now} (${verdict.kind}).`);
+    log.warning(`The page moved after it rendered: ${renderedUrl} -> ${now} (${verdict.kind}).`, describeNetwork(page));
     if (verdict.kind === 'login_required') {
         sessions.delete(host);
         throw new NonRetryableError(sessionExpired(host));
@@ -382,6 +406,26 @@ async function assertStillOnPage(page: Page, host: string, renderedUrl: string):
     if (verdict.kind === 'blocked') throw new NonRetryableError(taggedMessage('BLOCKED', verdict.reason));
     // Another Shopee page (not a refusal): not the page asked for, so not worth storing.
     throw new Error(taggedMessage('BLOCKED', `The page moved to ${now} before the capture.`));
+}
+
+let browserReported = false;
+
+/** The time zone and WebGL renderer the page sees: the two marks found to differ on the platform. */
+async function describeBrowser(page: Page): Promise<Record<string, unknown>> {
+    return page
+        .evaluate(() => {
+            const gl = document.createElement('canvas').getContext('webgl');
+            const dbg = gl?.getExtension('WEBGL_debug_renderer_info');
+            let webgl = 'none';
+            if (gl) webgl = dbg ? String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)) : 'yes';
+            return {
+                timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+                webgl,
+                platform: navigator.platform,
+                languages: navigator.languages.join(','),
+            };
+        })
+        .catch(() => ({}));
 }
 
 /** Best-effort: close a promotion popup that would cover the page. */
@@ -414,7 +458,11 @@ async function refreshSession(page: Page, host: string, ctxLog: PlaywrightCrawli
 
 // --- Crawler -------------------------------------------------------------------------------------
 
+/** One browser serves the run; a run is one storefront in practice, so its first URL decides. */
+const browserTimeZone = timeZoneForHost(requests[0]?.userData.host ?? 'shopee.vn');
+
 async function buildCrawler(): Promise<PlaywrightCrawler> {
+    log.info(`Browser time zone: ${browserTimeZone}`);
     return new PlaywrightCrawler({
         proxyConfiguration: await buildProxy(),
         navigationTimeoutSecs: NAVIGATION_TIMEOUT_SECS,
@@ -460,7 +508,10 @@ async function buildCrawler(): Promise<PlaywrightCrawler> {
                 executablePath: chrome.executablePath,
                 // The real window size, set with --window-size rather than emulated.
                 viewport: null,
-                args: ['--disable-gpu', `--window-size=${viewportWidth},${viewportHeight}`],
+                args: browserArgs(process.platform, viewportWidth, viewportHeight),
+                // The storefront's clock rather than the container's UTC: the process's own time
+                // zone, not an emulated one, so every API in the page agrees on it.
+                env: { ...process.env, TZ: browserTimeZone },
             },
         },
         browserPoolOptions: {
@@ -481,6 +532,7 @@ async function buildCrawler(): Promise<PlaywrightCrawler> {
                 const kind = watchedPageKind(request.url);
                 if (kind) watchPageApi(page, kind);
                 watchNetwork(page);
+                if (process.platform === 'linux') await reportDesktopGpu(page.context());
             },
         ],
         failedRequestHandler: async ({ request, log: ctxLog }, error) => {
@@ -493,6 +545,10 @@ async function buildCrawler(): Promise<PlaywrightCrawler> {
         requestHandler: async ({ page, request, log: ctxLog }) => {
             const { host, inputUrl } = request.userData as RequestData;
             const kind = watchedPageKind(request.url);
+            if (!browserReported) {
+                browserReported = true;
+                ctxLog.info('Browser as the page sees it.', await describeBrowser(page));
+            }
 
             // On a product or shop page its data API's answer is the verdict; elsewhere only the URL can
             // tell. Without it a shop page Shopee refused ("Trang không khả dụng", seen through a residential

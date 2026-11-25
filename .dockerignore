@@ -13,3 +13,7 @@ node_modules
 
 # git folder
 .git
+
+# secrets
+.env
+dist
