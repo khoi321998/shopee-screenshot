@@ -6,6 +6,7 @@
  *   npm run login -- --import <file.json>  # take the cookies of a Playwright storageState file instead
  *   npm run login -- --host shopee.co.th   # another storefront (default shopee.vn)
  *   npm run login -- --unlock              # solve the captcha Shopee put on the saved session (CAPTCHA_REQUIRED)
+ *   npm run login -- --proxy <url>         # through this proxy (default: proxyUrl of INPUT.json; --no-proxy for none)
  *
  * The session is a secret (it logs in as the account): this script prints cookie names only.
  * Locally it lands in storage/key_value_stores/shopee-session/session-<host>.json, which `apify run`
@@ -45,11 +46,12 @@ try {
 }
 
 const args = process.argv.slice(2);
-const arg =(name: string): string | undefined => {
+const arg = (name: string): string | undefined => {
     const i = args.indexOf(name);
     return i >= 0 ? args[i + 1] : undefined;
 };
 const host = arg('--host') ?? 'shopee.vn';
+
 const importFile = arg('--import');
 const checkUrl = arg('--check') ?? CHECK_URLS[host];
 const upload = args.includes('--upload');
@@ -64,6 +66,25 @@ if (upload && !process.env.APIFY_TOKEN) {
 
 await Actor.init();
 
+/**
+ * The proxy every Chrome window here goes through: `--proxy <url>`, else the Actor's own input
+ * `proxyUrl` (storage/key_value_stores/default/INPUT.json), so the login comes from the same static
+ * IP as the captures and Shopee sees one IP throughout. `--no-proxy` uses this machine's own IP.
+ */
+const inputProxyUrl = ((await Actor.getInput<{ proxyUrl?: string }>()) ?? {}).proxyUrl;
+const proxyUrl = args.includes('--no-proxy') ? undefined : arg('--proxy') || inputProxyUrl || undefined;
+const proxy = proxyUrl
+    ? (() => {
+          const u = new URL(proxyUrl);
+          return {
+              server: `${u.protocol}//${u.host}`,
+              username: decodeURIComponent(u.username),
+              password: decodeURIComponent(u.password),
+          };
+      })()
+    : undefined;
+console.log(proxy ? `Proxy: ${proxy.server}` : "Proxy: none (this machine's IP)");
+
 let cookies: ShopeeSession['cookies'];
 let loggedInAt = new Date().toISOString();
 
@@ -75,7 +96,7 @@ if (unlock) {
         console.log(`No saved session for ${host}${checkUrl ? '' : ' or no --check URL'}. Nothing to unlock.`);
         await Actor.exit({ exitCode: 1 });
     }
-    const browser = await chromium.launch({ channel: 'chrome', headless: false });
+    const browser = await chromium.launch({ channel: 'chrome', headless: false, proxy });
     const context = await browser.newContext({ viewport: null });
     await context.addCookies(saved!.cookies);
     const page = await context.newPage();
@@ -103,6 +124,7 @@ Chrome is open on a ${host} product page with the saved session.`);
         channel: 'chrome',
         headless: false,
         viewport: null,
+        proxy,
     });
     const page = context.pages()[0] ?? (await context.newPage());
     await page.goto(`https://${host}/buyer/login`, { waitUntil: 'domcontentloaded' });
@@ -126,7 +148,7 @@ if (!hasLoginCookie(cookies)) {
 if (checkUrl) {
     // The same check the Actor makes: a fresh headed Chrome with only these cookies.
     console.log(`Checking the session on ${checkUrl} ...`);
-    const browser = await chromium.launch({ channel: 'chrome', headless: false });
+    const browser = await chromium.launch({ channel: 'chrome', headless: false, proxy });
     const context = await browser.newContext();
     await context.addCookies(cookies);
     const page = await context.newPage();
