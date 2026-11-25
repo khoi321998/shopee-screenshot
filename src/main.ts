@@ -44,6 +44,7 @@ import {
     captureAndSave,
     type CaptureOptions,
     LISTING_CONTENT,
+    type PageCheck,
     waitForContent,
 } from './screenshot.js';
 import {
@@ -281,6 +282,8 @@ interface NetStats {
     failures: Map<string, number>;
     /** Seconds after the start at which the first response arrived, if any. */
     firstResponseSec: number | null;
+    /** Every main-frame URL the page went to, with the second it happened: shows a redirect after the render. */
+    navigations: string[];
 }
 
 const netStats = new WeakMap<Page, NetStats>();
@@ -292,8 +295,13 @@ function watchNetwork(page: Page): void {
         failed: 0,
         failures: new Map(),
         firstResponseSec: null,
+        navigations: [],
     };
     netStats.set(page, stats);
+    page.on('framenavigated', (frame) => {
+        if (frame !== page.mainFrame()) return;
+        stats.navigations.push(`${Math.round((Date.now() - stats.startedAt) / 1000)}s ${frame.url()}`);
+    });
     page.on('response', () => {
         stats.firstResponseSec ??= (Date.now() - stats.startedAt) / 1000;
     });
@@ -317,6 +325,7 @@ function describeNetwork(page: Page): Record<string, unknown> {
         requestsFinished: stats.finished,
         requestsFailed: stats.failed,
         failures: Object.fromEntries([...stats.failures].sort((a, b) => b[1] - a[1]).slice(0, 5)),
+        navigations: stats.navigations.slice(-5),
     };
 }
 
@@ -341,6 +350,38 @@ async function pageSummary(page: Page): Promise<{ title: string; excerpt: string
             { selectors: ACCOUNT_SELECTORS, max: EXCERPT_CHARS },
         )
         .catch(() => ({ title: '', excerpt: '' }));
+}
+
+/**
+ * Throws when the page left `renderedUrl` after it rendered: Shopee can send an account to its
+ * verification page after the scroll, and that page's full-window spinner was captured (2026-11-23).
+ * A captcha ends the storefront like one met on arrival; another IP would only add suspicion.
+ */
+async function assertStillOnPage(page: Page, host: string, renderedUrl: string): Promise<void> {
+    const now = page.url();
+    // Query and hash may change on the same page (Shopee adds filters as it scrolls): only the path counts.
+    const path = (url: string): string => {
+        try {
+            const { host: h, pathname } = new URL(url);
+            return `${h}${pathname.replace(/\/$/, '')}`;
+        } catch {
+            return url;
+        }
+    };
+    if (path(now) === path(renderedUrl)) return;
+    const verdict = classifyPage(now, null, hasLoginCookie(cookiesForHost(await page.context().cookies(), host)));
+    log.warning(`The page moved after it rendered: ${renderedUrl} -> ${now} (${verdict.kind}).`);
+    if (verdict.kind === 'login_required') {
+        sessions.delete(host);
+        throw new NonRetryableError(sessionExpired(host));
+    }
+    if (verdict.kind === 'challenge') {
+        challenged.add(host);
+        throw new NonRetryableError(captchaRequired(host));
+    }
+    if (verdict.kind === 'blocked') throw new NonRetryableError(taggedMessage('BLOCKED', verdict.reason));
+    // Another Shopee page (not a refusal): not the page asked for, so not worth storing.
+    throw new Error(taggedMessage('BLOCKED', `The page moved to ${now} before the capture.`));
 }
 
 /** Best-effort: close a promotion popup that would cover the page. */
@@ -534,7 +575,28 @@ async function buildCrawler(): Promise<PlaywrightCrawler> {
 
             // Shopee's own short error page (API error) is captured as it is, without the content check.
             const ok = apiCode === null || apiCode === 0;
-            await captureAndSave(page, inputUrl, captureOptions, ok && filled ? rule : null, ctxLog);
+            const renderedUrl = page.url();
+            const check: PageCheck = async (timeoutMs) => {
+                await assertStillOnPage(page, host, renderedUrl);
+                const again = await waitForContent(page, timeoutMs, rule);
+                if (again.filled) return;
+                // The redirect may have come while waiting for the content.
+                await assertStillOnPage(page, host, renderedUrl);
+                ctxLog.warning('The page lost its content before the capture.', {
+                    ...again.fill,
+                    ...(await pageSummary(page)),
+                    finalUrl: page.url(),
+                    ...describeNetwork(page),
+                });
+                throw new Error(
+                    taggedMessage(
+                        'BLOCKED',
+                        `The page lost its content before the capture (height ${again.fill.height}px, ` +
+                            `${again.fill.textLength} chars of text).`,
+                    ),
+                );
+            };
+            await captureAndSave(page, inputUrl, captureOptions, ok && filled ? check : null, ctxLog);
             await refreshSession(page, host, ctxLog);
         },
     });

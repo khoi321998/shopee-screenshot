@@ -11,3 +11,6 @@ storage
 
 # Added by Apify CLI
 .venv
+
+# Secrets (APIFY_TOKEN for npm run login -- --upload)
+.env

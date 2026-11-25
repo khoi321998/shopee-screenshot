@@ -36,8 +36,16 @@ const CHECK_URLS: Record<string, string> = {
     'shopee.vn': 'https://shopee.vn/product/7669738/57555754369',
 };
 
+// APIFY_TOKEN (and any other setting) from the project's .env, if there is one. Never committed.
+// A variable already set in the shell wins over the file.
+try {
+    process.loadEnvFile(resolve(import.meta.dirname, '..', '.env'));
+} catch {
+    /* no .env: the shell's environment only */
+}
+
 const args = process.argv.slice(2);
-const arg = (name: string): string | undefined => {
+const arg =(name: string): string | undefined => {
     const i = args.indexOf(name);
     return i >= 0 ? args[i + 1] : undefined;
 };
@@ -48,7 +56,9 @@ const upload = args.includes('--upload');
 const unlock = args.includes('--unlock');
 
 if (upload && !process.env.APIFY_TOKEN) {
-    console.log('--upload needs APIFY_TOKEN in the environment (Apify Console → Settings → API & Integrations).');
+    console.log(
+        '--upload needs APIFY_TOKEN, in .env or the environment (Apify Console → Settings → API & Integrations).',
+    );
     process.exit(1);
 }
 

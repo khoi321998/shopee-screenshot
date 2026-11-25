@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { Actor } from 'apify';
 import type { Page } from 'playwright';
 
-import { currentActorRunId, type OutputItem, taggedMessage } from './dataset.js';
+import { currentActorRunId, type OutputItem } from './dataset.js';
 import type { Logger } from './logger.js';
 
 export interface CaptureOptions {
@@ -15,9 +15,6 @@ export interface CaptureOptions {
     /** Full-page captures stop at this many CSS pixels from the top. */
     maxHeight: number;
 }
-
-/** Time the page may take to show its content again right before the capture (after the scroll). */
-const RECHECK_TIMEOUT_MS = 30_000;
 
 /**
  * Build a key-value-store-safe key for a screenshot. KV keys allow only `[a-zA-Z0-9!\-_.'()]`
@@ -178,6 +175,15 @@ async function lazyLoadScroll(page: Page, maxHeight: number, log: Logger): Promi
 }
 
 /**
+ * Throws when the page is no longer the page to capture (redirected to a verification page, or back
+ * on Shopee's loading spinner). `timeoutMs` is how long the page may take to show its content again.
+ */
+export type PageCheck = (timeoutMs: number) => Promise<void>;
+
+/** Time the page may take to show its content again right before the capture (after the scroll). */
+const RECHECK_TIMEOUT_MS = 30_000;
+
+/**
  * Capture a screenshot, store it in the default key-value store, and push
  * `{ url, screenshotUrl, actorRunId }` to the dataset. `screenshotUrl` is a signed public KV URL
  * with `disableRedirect=true` so it resolves directly to the PNG/JPEG.
@@ -186,25 +192,11 @@ export async function captureAndSave(
     page: Page,
     url: string,
     opts: CaptureOptions,
-    rule: ContentRule | null,
+    check: PageCheck | null,
     log: Logger,
 ): Promise<void> {
     if (opts.fullPage) {
         await lazyLoadScroll(page, opts.maxHeight, log);
-    }
-    if (rule) {
-        // Checked again right before the capture: the page was seen back on Shopee's loading spinner
-        // after the scroll, and that is what got captured (2026-11-23).
-        const { filled, fill } = await waitForContent(page, RECHECK_TIMEOUT_MS, rule);
-        if (!filled) {
-            throw new Error(
-                taggedMessage(
-                    'BLOCKED',
-                    `The page lost its content before the capture (height ${fill.height}px, ` +
-                        `${fill.textLength} chars of text).`,
-                ),
-            );
-        }
     }
     if (opts.hideAccount) {
         await hideAccount(page);
@@ -212,6 +204,9 @@ export async function captureAndSave(
     if (opts.waitMs > 0) {
         await page.waitForTimeout(opts.waitMs);
     }
+    // Checked right before the capture, after every wait: the page was seen back on a full-window
+    // spinner after the scroll, and a capture of that spinner was stored (2026-11-23).
+    if (check) await check(RECHECK_TIMEOUT_MS);
 
     // A full-page capture is clipped at maxHeight; the clip is in page coordinates.
     const pageSize = await page.evaluate(() => ({
@@ -226,6 +221,8 @@ export async function captureAndSave(
         type: opts.format,
         ...(opts.format === 'jpeg' ? { quality: 85 } : {}),
     });
+    // And once more right after: the page can switch away while the full-page capture is taken.
+    if (check) await check(0);
 
     const key = buildKey(url);
     const contentType = opts.format === 'jpeg' ? 'image/jpeg' : 'image/png';
